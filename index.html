@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Accelerometer Logger</title>
+  <style>
+    :root{
+      --bg:#0f172a; --panel:#111827; --ink:#e5e7eb; --muted:#9ca3af; --accent:#22d3ee;
+      --ok:#10b981; --warn:#f59e0b; --bad:#ef4444;
+    }
+    html,body{height:100%;}
+    body{
+      margin:0; font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      background:var(--bg); color:var(--ink); display:grid; place-items:center; padding:16px;
+    }
+    .card{
+      width:min(900px, 96vw); background:linear-gradient(180deg, #0b1225 0, #0b1225 66%, #0a1223 100%);
+      border:1px solid #1f2937; border-radius:18px; padding:20px 20px 8px; box-shadow:0 10px 30px rgba(0,0,0,.35);
+    }
+    h1{margin:0 0 8px; font-size:22px; letter-spacing:.2px;}
+    p.meta{margin:0 0 10px; color:var(--muted); font-size:13px}
+    .row{display:flex; gap:12px; flex-wrap:wrap; align-items:center;}
+    button{
+      all:unset; cursor:pointer; font-weight:600; padding:10px 14px; border-radius:10px;
+      background:#1f2937; border:1px solid #293241;
+    }
+    button.primary{ background:var(--accent); color:#052b33; border-color:#0ea5b6; }
+    button.warn{ background:#1f2937; border-color:#334155; color:#fca5a5 }
+    button[disabled]{ opacity:.45; cursor:not-allowed }
+    .led{ width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:8px; vertical-align:middle; }
+    .led.on{ background:var(--ok); box-shadow:0 0 0 2px rgba(16,185,129,.2); }
+    .led.off{ background:#374151 }
+    .grid{ display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin-top:14px;}
+    .tile{ background:#0b142a; border:1px solid #1f2937; border-radius:12px; padding:12px;}
+    .label{ color:var(--muted); font-size:12px; margin-bottom:6px;}
+    .val{ font-variant-numeric:tabular-nums; font-size:24px; }
+    .ballWrap{ margin-top:14px; height:160px; background:#081021; border:1px solid #14203b; border-radius:14px; position:relative; overflow:hidden;}
+    .ball{ width:32px; height:32px; border-radius:50%; position:absolute; left:50%; top:50%;
+           transform:translate(-50%,-50%); background:radial-gradient( circle at 30% 30%, #fff 0, #abdff5 25%, #22d3ee 70%, #0ea5b6 100%);
+           box-shadow: 0 6px 18px rgba(34,211,238,.35);
+    }
+    .footer{ display:flex; justify-content:space-between; align-items:center; margin-top:12px; gap:8px; color:var(--muted); font-size:12px;}
+    code{ background:#0b142a; border:1px solid #1f2937; padding:2px 6px; border-radius:6px; }
+    .sr{ position:absolute; left:-10000px; width:1px; height:1px; overflow:hidden;}
+  </style>
+</head>
+<body>
+  <main class="card" role="main" aria-labelledby="title">
+    <h1 id="title">Accelerometer Logger</h1>
+    <p class="meta">Captures DeviceMotion at ~60 Hz on iOS. Stores raw acceleration (prefers linear), gravity-removed (HPF), and metadata.</p>
+
+    <div class="row" aria-live="polite">
+      <span class="led off" id="led"></span><span id="status">Idle</span>
+      <button id="btnPerm" class="primary">Grant Motion Permission</button>
+      <button id="btnStart" disabled>Start</button>
+      <button id="btnStop" disabled class="warn">Stop</button>
+      <button id="btnExport" disabled>Export CSV</button>
+    </div>
+
+    <div class="grid" style="margin-top:10px">
+      <div class="tile"><div class="label">Time (s)</div><div class="val" id="timeVal">0.000</div></div>
+      <div class="tile"><div class="label">Interval (ms)</div><div class="val" id="dtVal">—</div></div>
+      <div class="tile"><div class="label">Samples</div><div class="val" id="nVal">0</div></div>
+    </div>
+
+    <div class="grid">
+      <div class="tile"><div class="label">ax (m/s²)</div><div class="val" id="axVal">0.00</div></div>
+      <div class="tile"><div class="label">ay (m/s²)</div><div class="val" id="ayVal">0.00</div></div>
+      <div class="tile"><div class="label">az (m/s²)</div><div class="val" id="azVal">0.00</div></div>
+    </div>
+
+    <div class="grid">
+      <div class="tile"><div class="label">|a| (m/s²)</div><div class="val" id="amagVal">0.00</div></div>
+      <div class="tile"><div class="label">HPF |a| (m/s²)</div><div class="val" id="amagHPFVal">0.00</div></div>
+      <div class="tile"><div class="label">Mean Hz</div><div class="val" id="hzVal">—</div></div>
+    </div>
+
+    <div class="ballWrap" aria-label="Motion visualization">
+      <div id="ball" class="ball"></div>
+    </div>
+
+    <div class="footer">
+      <div>Tip: keep the phone steady for 3–5 s first; this improves gravity estimation.</div>
+      <div><code>DeviceMotionEvent</code></div>
+    </div>
+    <div class="sr" id="ariaLog" aria-live="polite"></div>
+  </main>
+
+  <script>
+    let isActive = false;
+    let startT = null;
+    let lastT = null;
+    let n = 0;
+    let sumDt = 0;
+    let led = document.getElementById('led');
+    let statusEl = document.getElementById('status');
+    let btnPerm = document.getElementById('btnPerm');
+    let btnStart = document.getElementById('btnStart');
+    let btnStop = document.getElementById('btnStop');
+    let btnExport = document.getElementById('btnExport');
+
+    let timeVal = document.getElementById('timeVal');
+    let dtVal = document.getElementById('dtVal');
+    let nVal = document.getElementById('nVal');
+    let hzVal = document.getElementById('hzVal');
+    let axVal = document.getElementById('axVal');
+    let ayVal = document.getElementById('ayVal');
+    let azVal = document.getElementById('azVal');
+    let amagVal = document.getElementById('amagVal');
+    let amagHPFVal = document.getElementById('amagHPFVal');
+    let ariaLog = document.getElementById('ariaLog');
+    let ball = document.getElementById('ball');
+
+    let gxG=0, gyG=0, gzG=0;
+    const ALPHA = 0.92;
+
+    const rec = [];
+
+    function setStatus(txt, on=false){
+      statusEl.textContent = txt;
+      led.className = 'led ' + (on?'on':'off');
+      ariaLog.textContent = txt;
+    }
+
+    async function requestPermission(){
+      try {
+        if (typeof DeviceMotionEvent !== 'undefined' &&
+            typeof DeviceMotionEvent.requestPermission === 'function') {
+          const st = await DeviceMotionEvent.requestPermission();
+          if (st !== 'granted') throw new Error('Permission not granted');
+        }
+        btnStart.disabled = false;
+        btnPerm.disabled = true;
+        setStatus('Ready', false);
+      } catch(e){
+        setStatus('Permission denied', false);
+        alert('Motion permission not granted.');
+      }
+    }
+
+    function start(){
+      if (isActive) return;
+      isActive = true;
+      startT = performance.now();
+      lastT = startT;
+      n = 0; sumDt = 0;
+      gxG=0; gyG=0; gzG=0;
+      rec.length = 0;
+      btnStart.disabled = true;
+      btnStop.disabled = false;
+      btnExport.disabled = true;
+      setStatus('Recording…', true);
+      window.addEventListener('devicemotion', onMotion, { passive:true });
+    }
+
+    function stop(){
+      if (!isActive) return;
+      isActive = false;
+      window.removeEventListener('devicemotion', onMotion, { passive:true });
+      btnStart.disabled = false;
+      btnStop.disabled = true;
+      btnExport.disabled = rec.length === 0;
+      setStatus('Stopped', false);
+    }
+
+    function onMotion(e){
+      if (!isActive) return;
+      const t = performance.now();
+      const dt = (t - lastT) / 1000;
+      lastT = t;
+
+      const a = e.acceleration;
+      const ag = e.accelerationIncludingGravity || {};
+      let ax = (a && a.x != null) ? a.x : (ag.x || 0);
+      let ay = (a && a.y != null) ? a.y : (ag.y || 0);
+      let az = (a && a.z != null) ? a.z : (ag.z || 0);
+
+      gxG = ALPHA * gxG + (1-ALPHA) * ax;
+      gyG = ALPHA * gyG + (1-ALPHA) * ay;
+      gzG = ALPHA * gzG + (1-ALPHA) * az;
+      const lx = ax - gxG, ly = ay - gyG, lz = az - gzG;
+
+      const amag = Math.hypot(ax, ay, az);
+      const amagHPF = Math.hypot(lx, ly, lz);
+
+      if (n>0) { sumDt += dt; }
+      n++;
+
+      timeVal.textContent = ((t - startT)/1000).toFixed(3);
+      dtVal.textContent = (dt*1000).toFixed(1);
+      nVal.textContent = n;
+      hzVal.textContent = (n>1 ? (1/(sumDt/(n-1))).toFixed(2) : '—');
+      axVal.textContent = ax.toFixed(2);
+      ayVal.textContent = ay.toFixed(2);
+      azVal.textContent = az.toFixed(2);
+      amagVal.textContent = amag.toFixed(2);
+      amagHPFVal.textContent = amagHPF.toFixed(2);
+
+      // ball visualization (bounded)
+      const k = 3; // visual gain
+      const bx = Math.max(-100, Math.min(100, lx * k));
+      const by = Math.max(-60, Math.min(60, ly * k));
+      ball.style.transform = `translate(calc(-50% + ${bx}px), calc(-50% + ${by}px))`;
+
+      rec.push({
+        timestamp_ms: t,
+        time_s: (t - startT)/1000,
+        interval_s: (typeof e.interval === 'number') ? (e.interval/1000) : dt,
+        ax_m_s2: ax, ay_m_s2: ay, az_m_s2: az,
+        lax_m_s2: lx, lay_m_s2: ly, laz_m_s2: lz,
+        amag_m_s2: amag, amag_hpf_m_s2: amagHPF
+      });
+    }
+
+    function exportCSV(){
+      if (rec.length === 0) return;
+      const meanDt = sumDt/(Math.max(1,n-1));
+      const meta = [
+        '# Accelerometer Log',
+        `# device=iPhone 15`,
+        `# api=DeviceMotionEvent`,
+        `# samples=${rec.length}`,
+        `# mean_dt_s=${meanDt.toFixed(6)}`,
+        `# inferred_hz=${(1/meanDt).toFixed(3)}`,
+        `# columns=time_s,interval_s,ax_m_s2,ay_m_s2,az_m_s2,lax_m_s2,lay_m_s2,laz_m_s2,amag_m_s2,amag_hpf_m_s2`
+      ].join('\n');
+
+      const header = 'time_s,interval_s,ax_m_s2,ay_m_s2,az_m_s2,lax_m_s2,lay_m_s2,laz_m_s2,amag_m_s2,amag_hpf_m_s2';
+      const lines = rec.map(r => [
+        r.time_s, r.interval_s, r.ax_m_s2, r.ay_m_s2, r.az_m_s2,
+        r.lax_m_s2, r.lay_m_s2, r.laz_m_s2, r.amag_m_s2, r.amag_hpf_m_s2
+      ].map(v => (Number.isFinite(v)? v : '')).join(','));
+      const csv = meta + '\n' + header + '\n' + lines.join('\n');
+      const blob = new Blob([csv], {type: 'text/csv;charset=utf-8'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const ts = new Date().toISOString().replace(/[:.]/g,'-');
+      a.download = `accelerometer_${ts}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 0);
+    }
+
+    btnPerm.addEventListener('click', requestPermission);
+    btnStart.addEventListener('click', start);
+    btnStop.addEventListener('click', stop);
+    btnExport.addEventListener('click', exportCSV);
+
+    window.addEventListener('beforeunload', () => { if(isActive) stop(); });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden && isActive) stop();
+    });
+  </script>
+</body>
+</html>
